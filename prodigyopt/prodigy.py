@@ -60,6 +60,9 @@ class Prodigy(torch.optim.Optimizer):
                  d0=1e-6, d_coef=1.0, growth_rate=float('inf'),
                  fsdp_in_use=False,
                  slice_p=1):
+                 factored=False,
+                 eps2=1e-30,
+                 update_clip=None):
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
         if not 0.0 < lr:
@@ -84,6 +87,9 @@ class Prodigy(torch.optim.Optimizer):
                         decouple=decouple, safeguard_warmup=safeguard_warmup,
                         fsdp_in_use=fsdp_in_use,
                         slice_p=slice_p)
+                        factored=factored,
+                        eps2=eps2,
+                        update_clip=update_clip)
         self.d0 = d0
         super().__init__(params, defaults)
 
@@ -94,6 +100,16 @@ class Prodigy(torch.optim.Optimizer):
     @property
     def supports_flat_params(self):
         return True
+
+    @staticmethod
+    def _approx_sqrt(row, col):
+        r_factor = (row / row.mean(dim=-1, keepdim=True)).sqrt_().unsqueeze(-1)
+        c_factor = col.unsqueeze(-2).sqrt()
+        return torch.mul(r_factor, c_factor)
+
+    @staticmethod
+    def _rms(tensor):
+        return torch.linalg.norm(tensor) / (tensor.numel() ** 0.5)
 
     def step(self, closure=None):
         """Performs a single optimization step.
@@ -139,10 +155,12 @@ class Prodigy(torch.optim.Optimizer):
             decay = group['weight_decay']
             k = group['k']
             eps = group['eps']
+            eps2 = group['eps2']
             group_lr = group['lr']
             d0 = group['d0']
             safeguard_warmup = group['safeguard_warmup']
             slice_p = group['slice_p']
+            factored = group['factored']
 
             if group_lr not in [lr, 0.0]:
                 raise RuntimeError(f"Setting different lr values in different parameter groups is only supported for values of 0")
@@ -170,12 +188,16 @@ class Prodigy(torch.optim.Optimizer):
                     else: state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
 
                     # Exponential moving average of gradient values
-                    state['exp_avg'] = torch.zeros_like(p.data).detach()
-                    # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = torch.zeros_like(p.data).detach()
+                    if beta1 > 0:
+                        state['exp_avg'] = torch.zeros_like(p).detach()
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-               
+                    # Exponential moving average of squared gradient values
+                    if not factored or len(p.shape) < 2:
+                        state['exp_avg_sq'] = torch.zeros_like(p).detach()
+                    else:
+                        state["exp_avg_sq_row"] = torch.zeros(p.shape[:-1]).to(grad)
+                        state["exp_avg_sq_col"] = torch.zeros(p.shape[:-2] + p.shape[-1:]).to(grad)
+
                 s = state['s']
                 p0 = state['p0']
 
@@ -185,8 +207,20 @@ class Prodigy(torch.optim.Optimizer):
                     d_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
 
                     # Adam EMA updates
-                    exp_avg.mul_(beta1).add_(grad, alpha=d * (1-beta1))
-                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1-beta2))
+                    if beta1 > 0:
+                        exp_avg = state['exp_avg']
+                        exp_avg.mul_(beta1).add_(grad, alpha=d * (1-beta1))
+
+                    if not factored or len(p.shape) < 2:
+                        exp_avg_sq = state['exp_avg_sq']
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=d * d * (1-beta2))
+                    else:
+                        exp_avg_sq_row = state["exp_avg_sq_row"]
+                        exp_avg_sq_col = state["exp_avg_sq_col"]
+
+                        grad_sq=grad.square()+eps2
+                        exp_avg_sq_row.mul_(beta2).add_(grad_sq.mean(dim=-1), alpha=d * d * (1-beta2))
+                        exp_avg_sq_col.mul_(beta2).add_(grad_sq.mean(dim=-2), alpha=d * d * (1-beta2))
 
                     if safeguard_warmup:
                         s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * d))
@@ -231,6 +265,10 @@ class Prodigy(torch.optim.Optimizer):
             decay = group['weight_decay']
             k = group['k']
             eps = group['eps']
+            factored = group['factored']
+            update_clip = group['update_clip']
+            beta1, beta2 = group['betas']
+
 
             for p in group['params']:
                 if p.grad is None:
@@ -238,12 +276,17 @@ class Prodigy(torch.optim.Optimizer):
                 grad = p.grad.data
 
                 state = self.state[p]
-
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-
                 state['step'] += 1
 
-                denom = exp_avg_sq.sqrt().add_(d * eps)
+                if not factored or len(p.shape) < 2:
+                    exp_avg_sq = state['exp_avg_sq']
+                    denom = exp_avg_sq.sqrt()
+                else:
+                    exp_avg_sq_row = state["exp_avg_sq_row"]
+                    exp_avg_sq_col = state["exp_avg_sq_col"]
+                    denom = self._approx_sqrt(exp_avg_sq_row, exp_avg_sq_col)
+
+                denom.add_(d * eps)
 
                 # Apply weight decay (decoupled variant)
                 if decay != 0 and decouple:
@@ -251,9 +294,22 @@ class Prodigy(torch.optim.Optimizer):
 
 
                 ### Take step
-                p.data.addcdiv_(exp_avg, denom, value=-dlr)
+                if update_clip is None:
+                    if beta1 > 0: 
+                        exp_avg = state['exp_avg']
+                        p.data.addcdiv_(exp_avg, denom, value=-dlr)
+                    else: p.data.addcdiv_(grad, denom, value=-dlr * d)
+                else:
+                    if beta1 > 0:
+                        exp_avg = state['exp_avg']
+                        update=exp_avg.div(denom)
+                    else: update=grad.div(denom).mul_(d)
+                    clip_div=self._rms(update).clamp_(min=update_clip)
+                    p.data.add_(update,alpha = -dlr / clip_div)
+
 
             group['k'] = k + 1
 
         return loss
         
+
