@@ -86,7 +86,7 @@ class Prodigy(torch.optim.Optimizer):
                         use_bias_correction=use_bias_correction,
                         decouple=decouple, safeguard_warmup=safeguard_warmup,
                         fsdp_in_use=fsdp_in_use,
-                        slice_p=slice_p)
+                        slice_p=slice_p,
                         factored=factored,
                         eps2=eps2,
                         update_clip=update_clip)
