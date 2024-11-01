@@ -59,10 +59,10 @@ class Prodigy(torch.optim.Optimizer):
                  use_bias_correction=False, safeguard_warmup=False,
                  d0=1e-6, d_coef=1.0, growth_rate=float('inf'),
                  fsdp_in_use=False,
-                 slice_p=1,
-                 factored=False,
+                 slice_p=10,
+                 factored=True,
                  eps2=1e-30,
-                 update_clip=None):
+                 update_clip=True):
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
         if not 0.0 < lr:
