@@ -59,7 +59,7 @@ class Prodigy(torch.optim.Optimizer):
                  use_bias_correction=False, safeguard_warmup=False,
                  d0=1e-6, d_coef=1.0, growth_rate=float('inf'),
                  fsdp_in_use=False,
-                 slice_p=1
+                 slice_p=1,
                  factored=False,
                  eps2=1e-30,
                  update_clip=None):
