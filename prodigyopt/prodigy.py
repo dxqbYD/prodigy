@@ -336,7 +336,6 @@ class Prodigy(torch.optim.Optimizer):
 
                     if schedule_free:
                         z = state['z']
-                        p_before=p.data.clone()
                         p.data.lerp_(end=z, weight=ckp1)
 
                         p.data.add_(update, alpha = dlr*(beta1*(1-ckp1)-1) / clip_div)
