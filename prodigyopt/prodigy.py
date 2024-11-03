@@ -339,10 +339,7 @@ class Prodigy(torch.optim.Optimizer):
                         p_before=p.data.clone()
                         p.data.lerp_(end=z, weight=ckp1)
 
-                        self.rms+=self._rms(update*(beta1*(1-ckp1)-1)) / clip_div #TODO remove
-
                         p.data.add_(update, alpha = dlr*(beta1*(1-ckp1)-1) / clip_div)
-                        self.rms_minus_lerp+=self._rms(p.data - p_before)
                         z.sub_(update, alpha = dlr / clip_div) # FIXME by clip_div, correct?
                     else:
                         p.data.add_(update,alpha = -dlr / clip_div)
