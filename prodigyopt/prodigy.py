@@ -287,8 +287,6 @@ class Prodigy(torch.optim.Optimizer):
             update_clip = group['update_clip']
             beta1, beta2 = group['betas']
 
-            self.rms=0 #TODO remove
-            self.rms_minus_lerp=0 #TODO remove
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -348,11 +346,6 @@ class Prodigy(torch.optim.Optimizer):
                         z.sub_(update, alpha = dlr / clip_div) # FIXME by clip_div, correct?
                     else:
                         p.data.add_(update,alpha = -dlr / clip_div)
-            self.rms/=len(group['params']) #TODO to be polled by trainer; remove
-            self.rms_minus_lerp/=len(group['params'])
-            self.ckp1 = ckp1 #TODO
-            self.d_hat=d_hat #TODO
-            assert len(self.param_groups) == 1 #TODO
 
             group['k'] = k + 1
 
