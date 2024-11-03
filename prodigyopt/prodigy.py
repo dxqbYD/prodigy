@@ -325,21 +325,24 @@ class Prodigy(torch.optim.Optimizer):
                     else:
                         # Reuse grad buffer for memory efficiency
                         update=grad.div_(denom).mul_(d)
-                    
-                    if schedule_free and decay != 0 and decouple:
-                        update.add_(p.data, alpha=decay)  #TODO is it an issue that update clipping is applied to parameter decay?
-                    
+
                     if update_clip is not None:
                         clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
                     else: clip_div=1.0
+
+                    if schedule_free and decay != 0 and decouple:
+                        #TODO it seems strange that the weight decay is added to the parameter updates,
+                        #which are scaled later - but it matches the original schedule-free code.
+                        update.add_(p.data, alpha=decay)
+
 
                     if schedule_free:
                         z = state['z']
                         p_before=p.data.clone()
                         p.data.lerp_(end=z, weight=ckp1)
-                        
+
                         self.rms+=self._rms(update*(beta1*(1-ckp1)-1)) / clip_div #TODO remove
-                        
+
                         p.data.add_(update, alpha = dlr*(beta1*(1-ckp1)-1) / clip_div)
                         self.rms_minus_lerp+=self._rms(p.data - p_before)
                         z.sub_(update, alpha = dlr / clip_div) # FIXME by clip_div, correct?
