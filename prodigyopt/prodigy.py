@@ -62,7 +62,10 @@ class Prodigy(torch.optim.Optimizer):
                  slice_p=10,
                  factored=True,
                  eps2=1e-30,
-                 update_clip=1.0):
+                 update_clip=1.0,
+                 schedule_free=True,
+                 r=0.0,
+                 weight_lr_power=2.0):
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
         if not 0.0 < lr:
@@ -89,7 +92,11 @@ class Prodigy(torch.optim.Optimizer):
                         slice_p=slice_p,
                         factored=factored,
                         eps2=eps2,
-                        update_clip=update_clip)
+                        update_clip=update_clip,
+                        schedule_free=schedule_free,
+                        r=r,
+                        weight_lr_power=weight_lr_power,
+                        weight_sum=0.0)
         self.d0 = d0
         super().__init__(params, defaults)
 
@@ -135,14 +142,25 @@ class Prodigy(torch.optim.Optimizer):
         d = group['d']
         d_max = group['d_max']
         d_coef = group['d_coef']
+        schedule_free = group['schedule_free']
         lr = max(group['lr'] for group in self.param_groups)
 
         if use_bias_correction:
-            bias_correction = ((1 - beta2**(k+1))**0.5) / (1 - beta1**(k+1))
+            bias_correction = (1 - beta2**(k+1))**0.5
+            if not schedule_free:
+                bias_correction /= 1 - beta1**(k+1)
         else:
             bias_correction = 1
 
         dlr = d*lr*bias_correction
+
+        if schedule_free:
+            weight_lr_power = group['weight_lr_power']
+            r = group['r']
+            weight = ((k+1)**r) * (dlr**weight_lr_power)
+            weight_sum = group['weight_sum'] = group['weight_sum'] + weight
+            if weight_sum > 0: ckp1 = weight/weight_sum
+            else: ckp1 = 0
        
         growth_rate = group['growth_rate']
         decouple = group['decouple']
@@ -175,7 +193,8 @@ class Prodigy(torch.optim.Optimizer):
                
                 # Apply weight decay (coupled variant)
                 if decay != 0 and not decouple:
-                    grad.add_(p.data, alpha=decay)
+                    if not schedule_free: grad.add_(p.data, alpha=decay)
+                    else: raise NotImplementedError("decoupled weight decay not implemented for schedule_free")
 
                 state = self.state[p]
 
@@ -188,8 +207,10 @@ class Prodigy(torch.optim.Optimizer):
                     else: state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
 
                     # Exponential moving average of gradient values
-                    if beta1 > 0:
+                    if beta1 > 0 and not schedule_free:
                         state['exp_avg'] = torch.zeros_like(p).detach()
+                    elif schedule_free:
+                        state['z'] = torch.clone(p.data)
 
                     # Exponential moving average of squared gradient values
                     if not factored or len(p.shape) < 2:
@@ -207,7 +228,7 @@ class Prodigy(torch.optim.Optimizer):
                     d_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
 
                     # Adam EMA updates
-                    if beta1 > 0:
+                    if beta1 > 0 and not schedule_free:
                         exp_avg = state['exp_avg']
                         exp_avg.mul_(beta1).add_(grad, alpha=d * (1-beta1))
 
@@ -227,8 +248,6 @@ class Prodigy(torch.optim.Optimizer):
                     else:
                         s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * dlr))
                     d_denom += s.abs().sum().item()
-
-            ######
 
         d_hat = d
 
@@ -269,7 +288,8 @@ class Prodigy(torch.optim.Optimizer):
             update_clip = group['update_clip']
             beta1, beta2 = group['betas']
 
-
+            self.rms=0 #TODO remove
+            self.rms_minus_lerp=0 #TODO remove
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -289,24 +309,48 @@ class Prodigy(torch.optim.Optimizer):
                 denom.add_(d * eps)
 
                 # Apply weight decay (decoupled variant)
-                if decay != 0 and decouple:
+                if decay != 0 and decouple and not schedule_free:
                     p.data.add_(p.data, alpha=-decay * dlr)
 
 
                 ### Take step
-                if update_clip is None:
+                if update_clip is None and not schedule_free:
                     if beta1 > 0: 
                         exp_avg = state['exp_avg']
                         p.data.addcdiv_(exp_avg, denom, value=-dlr)
                     else: p.data.addcdiv_(grad, denom, value=-dlr * d)
                 else:
-                    if beta1 > 0:
+                    if beta1 > 0 and not schedule_free:
                         exp_avg = state['exp_avg']
                         update=exp_avg.div(denom)
-                    else: update=grad.div(denom).mul_(d)
-                    clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
-                    p.data.add_(update,alpha = -dlr / clip_div)
+                    else:
+                        # Reuse grad buffer for memory efficiency
+                        update=grad.div_(denom).mul_(d)
+                    
+                    if schedule_free and decay != 0 and decouple:
+                        update.add_(p.data, alpha=decay)  #TODO is it an issue that update clipping is applied to parameter decay?
+                    
+                    if update_clip is not None:
+                        clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
+                    else: clip_div=1.0
 
+                    if schedule_free:
+                        z = state['z']
+                        p_before=p.data.clone()
+                        p.data.lerp_(end=z, weight=ckp1)
+                        
+                        self.rms+=self._rms(update*(beta1*(1-ckp1)-1)) / clip_div #TODO remove
+                        
+                        p.data.add_(update, alpha = dlr*(beta1*(1-ckp1)-1) / clip_div)
+                        self.rms_minus_lerp+=self._rms(p.data - p_before)
+                        z.sub_(update, alpha = dlr / clip_div) # FIXME by clip_div, correct?
+                    else:
+                        p.data.add_(update,alpha = -dlr / clip_div)
+            self.rms/=len(group['params']) #TODO to be polled by trainer; remove
+            self.rms_minus_lerp/=len(group['params'])
+            self.ckp1 = ckp1 #TODO
+            self.d_hat=d_hat #TODO
+            assert len(self.param_groups) == 1 #TODO
 
             group['k'] = k + 1
 
