@@ -193,8 +193,7 @@ class Prodigy(torch.optim.Optimizer):
                
                 # Apply weight decay (coupled variant)
                 if decay != 0 and not decouple:
-                    if not schedule_free: grad.add_(p.data, alpha=decay)
-                    else: raise NotImplementedError("decoupled weight decay not implemented for schedule_free")
+                    grad.add_(p.data, alpha=decay)
 
                 state = self.state[p]
 
