@@ -326,7 +326,7 @@ class Prodigy(torch.optim.Optimizer):
                         clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
                     else: clip_div=1.0
 
-                    if schedule_free and decay != 0 and decouple:
+                    if decay != 0 and decouple:
                         #TODO scaling of weight decay by LR and ckp1 is intentional and matches
                         #original schedulefree code, but also by clip_div?
                         update.add_(p.data, alpha=decay)
