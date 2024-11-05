@@ -305,13 +305,11 @@ class Prodigy(torch.optim.Optimizer):
 
                 denom.add_(d * eps)
 
-                # Apply weight decay (decoupled variant)
-                if decay != 0 and decouple and not schedule_free:
-                    p.data.add_(p.data, alpha=-decay * dlr)
-
 
                 ### Take step
                 if update_clip is None and not schedule_free:
+                    if decay != 0 and decouple:
+                        p.data.add_(p.data, alpha=-decay * dlr)
                     if beta1 > 0: 
                         exp_avg = state['exp_avg']
                         p.data.addcdiv_(exp_avg, denom, value=-dlr)
@@ -329,8 +327,8 @@ class Prodigy(torch.optim.Optimizer):
                     else: clip_div=1.0
 
                     if schedule_free and decay != 0 and decouple:
-                        #TODO it seems strange that the weight decay is added to the parameter updates,
-                        #which are scaled later - but it matches the original schedule-free code.
+                        #TODO scaling of weight decay by LR and ckp1 is intentional and matches
+                        #original schedulefree code, but also by clip_div?
                         update.add_(p.data, alpha=decay)
 
 
